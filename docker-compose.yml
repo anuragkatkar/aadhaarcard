@@ -1,0 +1,55 @@
+services:
+  # ─────────────────────────────────────────────
+  # PaddleOCR served via PaddleX
+  # ─────────────────────────────────────────────
+  ocr:
+    image: ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlex/paddlex:paddlex3.0.1-paddlepaddle3.0.0-cpu
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: ${PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK:-True}
+      FLAGS_use_mkldnn: ${FLAGS_use_mkldnn:-0}
+      FLAGS_enable_pir_api: ${FLAGS_enable_pir_api:-0}
+      FLAGS_enable_pir_in_executor: ${FLAGS_enable_pir_in_executor:-0}
+      OCR_DEVICE: ${OCR_DEVICE:-cpu}
+    command: >
+      bash -c "
+      pip install --no-cache-dir paddlex[serving] &&
+      paddlex --serve --pipeline OCR --device ${OCR_DEVICE:-cpu} --host 0.0.0.0 --port 8100
+      "
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1', 8100), 2); s.close()"]
+      interval: 20s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      OCR_URL: ${OCR_URL:-http://ocr:8100}
+      MOONDREAM_URL: ${MOONDREAM_URL:-https://api.moondream.ai/v1/query}
+      MOONDREAM_API_KEY: ${MOONDREAM_API_KEY}
+      REQUEST_TIMEOUT_SECONDS: ${REQUEST_TIMEOUT_SECONDS:-120}
+      API_AUTH_ENABLED: ${API_AUTH_ENABLED:-true}
+      API_TOKENS: ${API_TOKENS}
+      OCR_TEXT_SCORE_THRESHOLD: ${OCR_TEXT_SCORE_THRESHOLD:-0.30}
+    ports:
+      - "8000:8000"
+    depends_on:
+      ocr:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health').read()"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
