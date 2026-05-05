@@ -16,7 +16,7 @@ API_PREFIX = "/api/v1"
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "90"))
 OCR_URL = os.getenv("OCR_URL", "http://localhost:8080")
 MOONDREAM_URL = os.getenv("MOONDREAM_URL", "https://api.moondream.ai/v1/query")
-MOONDREAM_API_KEY = os.getenv("MOONDREAM_API_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJrZXlfaWQiOiJhZjY1YTQ4ZC0zOTVhLTQ5OTQtODRhNy1hNDJiMjVlMDM3MjciLCJvcmdfaWQiOiI0WXVYNUpGc0ZFWmRuTzlIbHhqU3lWZ2pYQmFLU1RYZyIsImlhdCI6MTc3NjIzNjcwMiwidmVyIjoxfQ.ACLUtyOUK07oe-HgoYT4E3Z6MD-wAt-hKJwiwnVhYv8")
+MOONDREAM_API_KEY = os.getenv("MOONDREAM_API_KEY", "")
 OCR_TEXT_SCORE_THRESHOLD = float(os.getenv("OCR_TEXT_SCORE_THRESHOLD", "0.0"))
 
 API_AUTH_ENABLED = os.getenv("API_AUTH_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
