@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import re
 import secrets
 from typing import Any
 
@@ -13,12 +14,12 @@ APP_TITLE = "Aadhaar Extraction API"
 API_PREFIX = "/api/v1"
 
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "90"))
-OCR_URL = os.getenv("OCR_URL", "http://localhost:8100")
+OCR_URL = os.getenv("OCR_URL", "http://localhost:8080")
 MOONDREAM_URL = os.getenv("MOONDREAM_URL", "https://api.moondream.ai/v1/query")
-MOONDREAM_API_KEY = os.getenv("MOONDREAM_API_KEY", "")
+MOONDREAM_API_KEY = os.getenv("MOONDREAM_API_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJrZXlfaWQiOiJhZjY1YTQ4ZC0zOTVhLTQ5OTQtODRhNy1hNDJiMjVlMDM3MjciLCJvcmdfaWQiOiI0WXVYNUpGc0ZFWmRuTzlIbHhqU3lWZ2pYQmFLU1RYZyIsImlhdCI6MTc3NjIzNjcwMiwidmVyIjoxfQ.ACLUtyOUK07oe-HgoYT4E3Z6MD-wAt-hKJwiwnVhYv8")
 OCR_TEXT_SCORE_THRESHOLD = float(os.getenv("OCR_TEXT_SCORE_THRESHOLD", "0.0"))
 
-API_AUTH_ENABLED = os.getenv("API_AUTH_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+API_AUTH_ENABLED = os.getenv("API_AUTH_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 API_TOKENS = tuple(token.strip() for token in os.getenv("API_TOKENS", "").split(",") if token.strip())
 
 
@@ -147,16 +148,75 @@ def _json_from_text(text: str) -> dict[str, Any]:
 	return parsed
 
 
+def normalize_extracted_fields(payload: dict[str, Any]) -> dict[str, Any]:
+	canonical_keys = ("name", "aadhar number", "date of birth", "gender", "address")
+	aliases = {
+		"name": "name",
+		"aadhar": "aadhar number",
+		"aadhaar": "aadhar number",
+		"aadhar_number": "aadhar number",
+		"aadhaar_number": "aadhar number",
+		"aadhar number": "aadhar number",
+		"aadhaar number": "aadhar number",
+		"date_of_birth": "date of birth",
+		"year_of_birth": "date of birth",
+		"dob": "date of birth",
+		"yob": "date of birth",
+		"date of birth": "date of birth",
+		"year of birth": "date of birth",
+		"gender": "gender",
+		"sex": "gender",
+		"address": "address",
+	}
+
+	normalized: dict[str, Any] = {key: None for key in canonical_keys}
+	for raw_key, value in payload.items():
+		if not isinstance(raw_key, str):
+			continue
+		key = raw_key.strip().lower()
+		canonical = aliases.get(key)
+		if canonical is None:
+			continue
+		if normalized[canonical] is None and value is not None:
+			normalized[canonical] = value
+
+	aadhar_value = normalized.get("aadhar number")
+	if isinstance(aadhar_value, (int, float)):
+		normalized["aadhar number"] = str(int(aadhar_value))
+	elif isinstance(aadhar_value, str):
+		digits_only = re.sub(r"\D", "", aadhar_value)
+		normalized["aadhar number"] = digits_only or None
+
+	address = normalized.get("address")
+	if isinstance(address, str):
+		cleaned = re.sub(r"[\r\n\t]+", " ", address)
+		cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+		normalized["address"] = cleaned or None
+
+	return normalized
+
+
 def build_moondream_prompt(ocr_text: str) -> str:
 	return (
 		"You are an Aadhaar card data extraction engine. "
-		"Use the image as the primary source and use OCR text only as supporting evidence for exact words and numbers. "
-		"Extract details carefully. Return ONLY a valid JSON object with exactly these keys: "
-		'"name", "aadhar number", "date of birth", "gender", "address". '
+		"Use OCR text as the PRIMARY and authoritative source for all extracted fields. "
+		"Use the image only as a secondary fallback to resolve unclear OCR tokens, not to invent missing values. "
+		"If OCR and image disagree, prefer OCR unless OCR is clearly corrupted or incomplete. "
+		"Do not infer, guess, or hallucinate any value that is not supported by OCR text. "
+		"The phrases 'Government of India', 'Unique Identification Authority of India', and 'Aadhaar' are document header text and must never be used as name or address values. "
+		"Extract details carefully. Return ONLY a valid JSON object using exactly this structure:\n"
+		"{\n"
+		'  "name": null,\n'
+		'  "aadhar number": null,\n'
+		'  "date of birth": null,\n'
+		'  "gender": null,\n'
+		'  "address": null\n'
+		"}\n"
 		"Do not add markdown, explanations, or extra keys. "
-		"If a value is missing or unreadable, set it to null. "
-		"For \"aadhar number\", return only the 12-digit number without spaces if present. "
+		"If a value is missing or unreadable, keep it as null. "
+		"For \"aadhar number\", value can be a string or integer, and must contain only the 12 digits without spaces if present. "
 		"For \"date of birth\", keep the value exactly as visible on the card. "
+		"If full date of birth is not visible but only year of birth is present, set \"date of birth\" to that 4-digit year. "
 		"OCR support text follows:\n\n"
 		f"{ocr_text}"
 	)
@@ -200,9 +260,9 @@ async def extract_aadhaar(
 			ocr_resp = await client.post(f"{OCR_URL}/ocr", json=ocr_payload)
 			ocr_resp.raise_for_status()
 		except httpx.HTTPStatusError as exc:
-			raise HTTPException(status_code=502, detail=f"Paddle OCR failed: {exc}") from exc
+			raise HTTPException(status_code=502, detail=f"Text extraction service failed: {exc}") from exc
 		except httpx.RequestError as exc:
-			raise HTTPException(status_code=503, detail=f"Paddle OCR unavailable: {exc}") from exc
+			raise HTTPException(status_code=503, detail=f"Text extraction service unavailable: {exc}") from exc
 
 		ocr_json = ocr_resp.json()
 		ocr_text = extract_paddlex_ocr_text(ocr_json)
@@ -222,35 +282,41 @@ async def extract_aadhaar(
 			)
 			md_resp.raise_for_status()
 		except httpx.HTTPStatusError as exc:
-			raise HTTPException(status_code=502, detail=f"Moondream API failed: {exc}") from exc
+			raise HTTPException(status_code=502, detail=f"LLM service failed: {exc}") from exc
 		except httpx.RequestError as exc:
-			raise HTTPException(status_code=503, detail=f"Moondream API unavailable: {exc}") from exc
+			raise HTTPException(status_code=503, detail=f"LLM service unavailable: {exc}") from exc
 
 	md_json = md_resp.json()
 	answer_text = str(md_json.get("answer", "")).strip()
 	if not answer_text:
-		raise HTTPException(status_code=502, detail="Moondream response did not include an answer.")
+		raise HTTPException(status_code=502, detail="LLM response did not include an answer.")
 
 	try:
 		extracted = _json_from_text(answer_text)
 	except (ValueError, json.JSONDecodeError):
-		# Return raw answer if the model ignored strict JSON instructions.
-		extracted = {
-			"name": None,
-			"aadhar number": None,
-			"date of birth": None,
-			"gender": None,
-			"address": None,
-		}
+		return JSONResponse(
+			{
+				"ocr": ocr_text,
+				"llm": answer_text,
+			}
+		)
 
-	for key in ("name", "aadhar number", "date of birth", "gender", "address"):
-		extracted.setdefault(key, None)
+	extracted = normalize_extracted_fields(extracted)
+
+	if extracted.get("date of birth") is None:
+		yob_match = re.search(
+			r"(?:year\s*of\s*birth|yob)\s*[:\-]?\s*(\d{4})",
+			ocr_text,
+			flags=re.IGNORECASE,
+		)
+		if yob_match:
+			extracted["date of birth"] = yob_match.group(1)
 
 	return JSONResponse(
 		{
-			"extracted": extracted,
-			"ocr_text": ocr_text,
-			"moondream_answer": answer_text,
+			"data": extracted,
+			"ocr": ocr_text,
+			"llm": answer_text,
 		}
 	)
 

@@ -2,3 +2,6 @@
 *archive*
 *aadharcard*
 *output*
+.env
+*tmp*
+*__pycache__*
