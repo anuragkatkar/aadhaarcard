@@ -15,8 +15,12 @@ API_PREFIX = "/api/v1"
 
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "90"))
 OCR_URL = os.getenv("OCR_URL", "http://localhost:8080")
-MOONDREAM_URL = os.getenv("MOONDREAM_URL", "https://api.moondream.ai/v1/query")
-MOONDREAM_API_KEY = os.getenv("MOONDREAM_API_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJrZXlfaWQiOiJhZjY1YTQ4ZC0zOTVhLTQ5OTQtODRhNy1hNDJiMjVlMDM3MjciLCJvcmdfaWQiOiI0WXVYNUpGc0ZFWmRuTzlIbHhqU3lWZ2pYQmFLU1RYZyIsImlhdCI6MTc3NjIzNjcwMiwidmVyIjoxfQ.ACLUtyOUK07oe-HgoYT4E3Z6MD-wAt-hKJwiwnVhYv8")
+LLM_URL = os.getenv(
+	"LLM_URL",
+	"https://generativelanguage.googleapis.com/v1beta/models/gemma-3-12b-it:generateContent",
+)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+PASS_IMAGE = os.getenv("PASS_IMAGE", "false").lower() in {"1", "true", "yes", "on"}
 OCR_TEXT_SCORE_THRESHOLD = float(os.getenv("OCR_TEXT_SCORE_THRESHOLD", "0.0"))
 
 API_AUTH_ENABLED = os.getenv("API_AUTH_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
@@ -148,6 +152,34 @@ def _json_from_text(text: str) -> dict[str, Any]:
 	return parsed
 
 
+def _extract_llm_answer(payload: Any) -> str:
+	if not isinstance(payload, dict):
+		return ""
+
+	candidates = payload.get("candidates")
+	if not isinstance(candidates, list):
+		return ""
+
+	fragments: list[str] = []
+	for candidate in candidates:
+		if not isinstance(candidate, dict):
+			continue
+		content = candidate.get("content")
+		if not isinstance(content, dict):
+			continue
+		parts = content.get("parts")
+		if not isinstance(parts, list):
+			continue
+		for part in parts:
+			if not isinstance(part, dict):
+				continue
+			text = part.get("text")
+			if isinstance(text, str) and text.strip():
+				fragments.append(text.strip())
+
+	return "\n".join(fragments).strip()
+
+
 def normalize_extracted_fields(payload: dict[str, Any]) -> dict[str, Any]:
 	canonical_keys = ("name", "aadhar number", "date of birth", "gender", "address")
 	aliases = {
@@ -239,8 +271,8 @@ async def extract_aadhaar(
 ) -> JSONResponse:
 	require_api_token(request)
 
-	if not MOONDREAM_API_KEY.strip():
-		raise HTTPException(status_code=500, detail="MOONDREAM_API_KEY is not configured.")
+	if not GEMINI_API_KEY.strip():
+		raise HTTPException(status_code=500, detail="GEMINI_API_KEY is not configured.")
 
 	file_bytes = await file.read()
 	if not file_bytes:
@@ -248,7 +280,6 @@ async def extract_aadhaar(
 
 	mime = detect_image_mime(file_bytes, file.content_type or "", file.filename or "")
 	encoded_image = base64.b64encode(file_bytes).decode("ascii")
-	image_url = f"data:{mime};base64,{encoded_image}"
 
 	ocr_payload = {
 		"file": encoded_image,
@@ -267,17 +298,34 @@ async def extract_aadhaar(
 		ocr_json = ocr_resp.json()
 		ocr_text = extract_paddlex_ocr_text(ocr_json)
 		prompt = build_moondream_prompt(ocr_text)
+		llm_parts: list[dict[str, Any]] = [{"text": prompt}]
+		if PASS_IMAGE:
+			llm_parts.append(
+				{
+					"inline_data": {
+						"mime_type": mime,
+						"data": encoded_image,
+					}
+				}
+			)
 
 		try:
 			md_resp = await client.post(
-				MOONDREAM_URL,
+				LLM_URL,
 				headers={
 					"Content-Type": "application/json",
-					"X-Moondream-Auth": MOONDREAM_API_KEY,
+					"x-goog-api-key": GEMINI_API_KEY,
 				},
 				json={
-					"image_url": image_url,
-					"question": prompt,
+					"contents": [
+						{
+							"parts": llm_parts
+						}
+					],
+					"generationConfig": {
+						"maxOutputTokens": 400,
+						"temperature": 0,
+					},
 				},
 			)
 			md_resp.raise_for_status()
@@ -287,7 +335,7 @@ async def extract_aadhaar(
 			raise HTTPException(status_code=503, detail=f"LLM service unavailable: {exc}") from exc
 
 	md_json = md_resp.json()
-	answer_text = str(md_json.get("answer", "")).strip()
+	answer_text = _extract_llm_answer(md_json)
 	if not answer_text:
 		raise HTTPException(status_code=502, detail="LLM response did not include an answer.")
 
