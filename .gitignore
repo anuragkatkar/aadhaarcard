@@ -5,3 +5,4 @@
 .env
 *tmp*
 *__pycache__*
+*debug*

@@ -1,14 +1,22 @@
-FROM python:3.11-slim
+FROM python:3.10-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+	PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+RUN apt-get update && apt-get install -y --no-install-recommends \
+	libgl1 \
+	libglib2.0-0 \
+	&& rm -rf /var/lib/apt/lists/*
 
-COPY main.py /app/main.py
+COPY requirements.txt .
+
+# PaddlePaddle CPU wheel is installed first from the official CPU index.
+RUN pip install --no-cache-dir paddlepaddle==3.0.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
 
 EXPOSE 8000
 
